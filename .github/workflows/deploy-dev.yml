@@ -1,0 +1,166 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: aegis-dev
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "18"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-mock moto boto3-stubs
+      
+      - name: Run unit tests
+        run: |
+          pytest tests/unit -v --cov=src --cov-report=xml --cov-report=html
+      
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Bandit Security Scan
+        uses: jlwoodward/bandit-action@v1.0.0
+        with:
+          config_file: .bandit
+      
+      - name: Run Safety Check
+        run: |
+          pip install safety
+          safety check --json
+
+  validate-sam:
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Set up SAM CLI
+        uses: aws-actions/setup-sam@v2
+      
+      - name: Validate SAM template
+        run: |
+          sam validate --template infrastructure/template.yaml --lint
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: validate-sam
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      
+      - name: Set up SAM CLI
+        uses: aws-actions/setup-sam@v2
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Build Lambda Layer
+        run: |
+          cd infrastructure/layers
+          ./build-layers.sh
+      
+      - name: Build SAM application
+        run: |
+          sam build \
+            --template infrastructure/template.yaml \
+            --parameter-overrides \
+              Environment=dev \
+              EnableTracing=true \
+              LogLevel=DEBUG
+      
+      - name: Deploy to AWS
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --stack-name ${{ env.STACK_NAME }} \
+            --s3-bucket ${{ secrets.SAM_ARTIFACTS_BUCKET_DEV }} \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }} \
+            --parameter-overrides \
+              Environment=dev \
+              EnableTracing=true \
+              LogLevel=DEBUG \
+              AlarmEmail=${{ secrets.ALARM_EMAIL_DEV }}
+      
+      - name: Deploy Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          aws s3 sync build/ s3://${{ secrets.FRONTEND_BUCKET_DEV }} --delete
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_DEV }} \
+            --paths "/*"
+      
+      - name: Run integration tests
+        run: |
+          export API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
+            --output text)
+          pytest tests/integration -v --api-endpoint=$API_ENDPOINT
+      
+      - name: Post deployment notification
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Development deployment ${{ job.status }}'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          channel: '#aegis-deployments'
