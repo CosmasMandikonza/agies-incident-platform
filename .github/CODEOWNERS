@@ -1,0 +1,19 @@
+# Default code owners for the entire repository
+* @yourusername
+
+# Infrastructure code owners
+/infrastructure/ @yourusername
+/infrastructure/template.yaml @yourusername
+
+# Lambda functions
+/src/ @yourusername
+
+# Frontend application
+/frontend/ @yourusername
+
+# Documentation
+/docs/ @yourusername
+README.md @yourusername
+
+# CI/CD
+/.github/ @yourusername

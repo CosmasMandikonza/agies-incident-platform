@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # DynamoDB Local
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    container_name: aegis-dynamodb
+    ports:
+      - "8000:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+    networks:
+      - aegis-network
+
+  # DynamoDB Admin UI
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin:latest
+    container_name: aegis-dynamodb-admin
+    ports:
+      - "8001:8001"
+    environment:
+      DYNAMO_ENDPOINT: "http://dynamodb:8000"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "local"
+      AWS_SECRET_ACCESS_KEY: "local"
+    depends_on:
+      - dynamodb
+    networks:
+      - aegis-network
+
+  # LocalStack for other AWS services
+  localstack:
+    image: localstack/localstack:latest
+    container_name: aegis-localstack
+    ports:
+      - "4566:4566"  # LocalStack Gateway
+      - "4571:4571"  # Elasticsearch
+    environment:
+      - SERVICES=s3,sqs,sns,secretsmanager,events,logs,iam,cognito,appsync
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+      - LAMBDA_EXECUTOR=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - "./scripts/localstack:/docker-entrypoint-initaws.d"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "localstack-data:/tmp/localstack"
+    networks:
+      - aegis-network
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: aegis-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - "redis-data:/data"
+    networks:
+      - aegis-network
+
+  # PostgreSQL for future analytics (optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: aegis-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis_local
+      POSTGRES_DB: aegis_analytics
+    volumes:
+      - "postgres-data:/var/lib/postgresql/data"
+    networks:
+      - aegis-network
+
+  # Grafana for monitoring (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: aegis-grafana
+    ports:
+      - "3030:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - "grafana-data:/var/lib/grafana"
+    networks:
+      - aegis-network
+
+networks:
+  aegis-network:
+    driver: bridge
+    name: aegis-network
+
+volumes:
+  localstack-data:
+  redis-data:
+  postgres-data:
+  grafana-data:

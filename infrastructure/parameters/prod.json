@@ -1,0 +1,18 @@
+{
+  "Parameters": {
+    "Environment": "dev",
+    "LogLevel": "DEBUG",
+    "EnableTracing": "true",
+    "AlarmEmail": "dev-alerts@example.com",
+    "EnableAutoScaling": "false",
+    "MinCapacity": "5",
+    "MaxCapacity": "20"
+  },
+  "Tags": {
+    "Project": "Aegis",
+    "Environment": "dev",
+    "ManagedBy": "SAM",
+    "CostCenter": "Engineering",
+    "Owner": "DevTeam"
+  }
+}
