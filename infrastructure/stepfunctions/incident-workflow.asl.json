@@ -1,0 +1,623 @@
+{
+  "Comment": "Aegis Incident Lifecycle Workflow - Orchestrates the complete incident management process",
+  "StartAt": "ValidateInput",
+  "States": {
+    "ValidateInput": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ValidateInputFunctionArn}",
+        "Payload": {
+          "incidentId.$": "$.incidentId",
+          "source.$": "$.source",
+          "detail.$": "$.detail"
+        }
+      },
+      "ResultPath": "$.validation",
+      "Catch": [
+        {
+          "ErrorEquals": ["ValidationError"],
+          "Next": "IncidentValidationFailed"
+        }
+      ],
+      "Next": "TriageIncident"
+    },
+    
+    "IncidentValidationFailed": {
+      "Type": "Fail",
+      "Error": "IncidentValidationError",
+      "Cause": "Incident data validation failed"
+    },
+    
+    "TriageIncident": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${TriageFunctionArn}",
+        "Payload": {
+          "incidentId.$": "$.incidentId"
+        }
+      },
+      "ResultPath": "$.triage",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TriageFailed"
+        }
+      ],
+      "Next": "CheckSeverity"
+    },
+    
+    "TriageFailed": {
+      "Type": "Pass",
+      "Parameters": {
+        "triage": {
+          "severity": "P2",
+          "confidence": 0,
+          "message": "Automated triage failed, using default severity"
+        }
+      },
+      "ResultPath": "$.triage",
+      "Next": "CheckSeverity"
+    },
+    
+    "CheckSeverity": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.triage.Payload.severity",
+          "StringEquals": "P0",
+          "Next": "CriticalIncidentFlow"
+        },
+        {
+          "Variable": "$.triage.Payload.severity",
+          "StringEquals": "P1",
+          "Next": "HighPriorityFlow"
+        },
+        {
+          "Variable": "$.triage.Payload.severity",
+          "StringEquals": "P2",
+          "Next": "StandardFlow"
+        }
+      ],
+      "Default": "LowPriorityFlow"
+    },
+    
+    "CriticalIncidentFlow": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "PageAllOnCall",
+          "States": {
+            "PageAllOnCall": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "${NotificationQueueUrl}",
+                "MessageBody": {
+                  "type": "PAGE",
+                  "incidentId.$": "$.incidentId",
+                  "target": "primary-oncall",
+                  "priority": "critical",
+                  "message": "CRITICAL P0 Incident - Immediate response required",
+                  "metadata": {
+                    "severity": "P0",
+                    "escalation": "immediate"
+                  }
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "NotifySlackP0Channel",
+          "States": {
+            "NotifySlackP0Channel": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "${NotificationQueueUrl}",
+                "MessageBody": {
+                  "type": "SLACK",
+                  "incidentId.$": "$.incidentId",
+                  "target": "#incidents-p0",
+                  "priority": "critical",
+                  "message.$": "States.Format('🚨 CRITICAL P0 INCIDENT: {} 🚨', $.title)"
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CreateWarRoom",
+          "States": {
+            "CreateWarRoom": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "aegis.workflow",
+                    "DetailType": "Create War Room",
+                    "Detail": {
+                      "incidentId.$": "$.incidentId",
+                      "severity": "P0",
+                      "action": "create_incident_channel"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.notifications",
+      "Next": "WaitForAcknowledgement"
+    },
+    
+    "HighPriorityFlow": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "PagePrimaryOnCall",
+          "States": {
+            "PagePrimaryOnCall": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "${NotificationQueueUrl}",
+                "MessageBody": {
+                  "type": "PAGE",
+                  "incidentId.$": "$.incidentId",
+                  "target": "primary-oncall",
+                  "priority": "high",
+                  "message": "P1 Incident requiring attention"
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "NotifySlackIncidents",
+          "States": {
+            "NotifySlackIncidents": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "${NotificationQueueUrl}",
+                "MessageBody": {
+                  "type": "SLACK",
+                  "incidentId.$": "$.incidentId",
+                  "target": "#incidents",
+                  "priority": "high",
+                  "message.$": "States.Format('⚠️ P1 INCIDENT: {}', $.title)"
+                }
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.notifications",
+      "Next": "WaitForAcknowledgement"
+    },
+    
+    "StandardFlow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage",
+      "Parameters": {
+        "QueueUrl": "${NotificationQueueUrl}",
+        "MessageBody": {
+          "type": "SLACK",
+          "incidentId.$": "$.incidentId",
+          "target": "#incidents",
+          "priority": "normal",
+          "message.$": "States.Format('📋 P2 Incident: {}', $.title)"
+        }
+      },
+      "ResultPath": "$.notifications",
+      "Next": "WaitForAcknowledgement"
+    },
+    
+    "LowPriorityFlow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage",
+      "Parameters": {
+        "QueueUrl": "${NotificationQueueUrl}",
+        "MessageBody": {
+          "type": "SLACK",
+          "incidentId.$": "$.incidentId",
+          "target": "#incidents-low-priority",
+          "priority": "low",
+          "message.$": "States.Format('📝 Low Priority Incident: {}', $.title)"
+        }
+      },
+      "ResultPath": "$.notifications",
+      "Next": "RecordIncidentCreated"
+    },
+    
+    "WaitForAcknowledgement": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+      "Parameters": {
+        "QueueUrl": "${CallbackQueueUrl}",
+        "MessageBody": {
+          "TaskToken.$": "$$.Task.Token",
+          "IncidentId.$": "$.incidentId",
+          "Severity.$": "$.triage.Payload.severity",
+          "Action": "ACKNOWLEDGE"
+        }
+      },
+      "TimeoutSeconds": 300,
+      "HeartbeatSeconds": 60,
+      "ResultPath": "$.acknowledgement",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+          "ResultPath": "$.acknowledgementError",
+          "Next": "CheckEscalation"
+        }
+      ],
+      "Next": "IncidentAcknowledged"
+    },
+    
+    "CheckEscalation": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.triage.Payload.severity",
+              "StringEquals": "P0"
+            },
+            {
+              "Variable": "$.acknowledgementError",
+              "IsPresent": true
+            }
+          ],
+          "Next": "EscalateToManagement"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.triage.Payload.severity",
+              "StringEquals": "P1"
+            },
+            {
+              "Variable": "$.acknowledgementError",
+              "IsPresent": true
+            }
+          ],
+          "Next": "EscalateToSecondary"
+        }
+      ],
+      "Default": "RecordNoAcknowledgement"
+    },
+    
+    "EscalateToManagement": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "PageManagement",
+          "States": {
+            "PageManagement": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "${NotificationQueueUrl}",
+                "MessageBody": {
+                  "type": "PAGE",
+                  "incidentId.$": "$.incidentId",
+                  "target": "management-oncall",
+                  "priority": "critical",
+                  "message": "ESCALATION: P0 incident not acknowledged within 5 minutes"
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "NotifyExecutives",
+          "States": {
+            "NotifyExecutives": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "aegis.workflow",
+                    "DetailType": "Executive Notification Required",
+                    "Detail": {
+                      "incidentId.$": "$.incidentId",
+                      "severity": "P0",
+                      "reason": "no_acknowledgement",
+                      "escalationLevel": "executive"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.escalation",
+      "Next": "WaitForEscalationResponse"
+    },
+    
+    "EscalateToSecondary": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage",
+      "Parameters": {
+        "QueueUrl": "${NotificationQueueUrl}",
+        "MessageBody": {
+          "type": "PAGE",
+          "incidentId.$": "$.incidentId",
+          "target": "secondary-oncall",
+          "priority": "high",
+          "message": "ESCALATION: P1 incident not acknowledged"
+        }
+      },
+      "ResultPath": "$.escalation",
+      "Next": "WaitForEscalationResponse"
+    },
+    
+    "RecordNoAcknowledgement": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "aegis.workflow",
+            "DetailType": "Incident Not Acknowledged",
+            "Detail": {
+              "incidentId.$": "$.incidentId",
+              "severity.$": "$.triage.Payload.severity",
+              "timeoutMinutes": 5
+            },
+            "EventBusName": "${EventBusName}"
+          }
+        ]
+      },
+      "Next": "MonitorIncident"
+    },
+    
+    "WaitForEscalationResponse": {
+      "Type": "Wait",
+      "Seconds": 300,
+      "Next": "IncidentAcknowledged"
+    },
+    
+    "IncidentAcknowledged": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "aegis.workflow",
+            "DetailType": "Incident Status Changed",
+            "Detail": {
+              "incidentId.$": "$.incidentId",
+              "status": "ACKNOWLEDGED",
+              "acknowledgedBy.$": "$.acknowledgement.userId",
+              "acknowledgedAt.$": "$$.State.EnteredTime"
+            },
+            "EventBusName": "${EventBusName}"
+          }
+        ]
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "MonitorIncident"
+    },
+    
+    "RecordIncidentCreated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "aegis.workflow",
+            "DetailType": "Incident Workflow Started",
+            "Detail": {
+              "incidentId.$": "$.incidentId",
+              "severity.$": "$.triage.Payload.severity",
+              "workflowExecutionId.$": "$$.Execution.Id"
+            },
+            "EventBusName": "${EventBusName}"
+          }
+        ]
+      },
+      "Next": "MonitorIncident"
+    },
+    
+    "MonitorIncident": {
+      "Type": "Wait",
+      "Seconds": 1800,
+      "Next": "CheckIncidentStatus"
+    },
+    
+    "CheckIncidentStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CheckStatusFunctionArn}",
+        "Payload": {
+          "incidentId.$": "$.incidentId"
+        }
+      },
+      "ResultPath": "$.currentStatus",
+      "Next": "EvaluateStatus"
+    },
+    
+    "EvaluateStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.currentStatus.Payload.status",
+          "StringEquals": "RESOLVED",
+          "Next": "GeneratePostMortem"
+        },
+        {
+          "Variable": "$.currentStatus.Payload.status",
+          "StringEquals": "CLOSED",
+          "Next": "IncidentClosed"
+        },
+        {
+          "Variable": "$.currentStatus.Payload.runTime",
+          "NumericGreaterThan": 14400,
+          "Next": "LongRunningIncident"
+        }
+      ],
+      "Default": "MonitorIncident"
+    },
+    
+    "LongRunningIncident": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "aegis.workflow",
+            "DetailType": "Long Running Incident Alert",
+            "Detail": {
+              "incidentId.$": "$.incidentId",
+              "runTimeHours.$": "States.MathDivide($.currentStatus.Payload.runTime, 3600)",
+              "message": "Incident has been running for over 4 hours"
+            },
+            "EventBusName": "${EventBusName}"
+          }
+        ]
+      },
+      "Next": "MonitorIncident"
+    },
+    
+    "GeneratePostMortem": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${GenAIScribeFunctionArn}",
+        "Payload": {
+          "action": "GENERATE_POST_MORTEM",
+          "incidentId.$": "$.incidentId"
+        }
+      },
+      "ResultPath": "$.postMortem",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.postMortemError",
+          "Next": "PostMortemFailed"
+        }
+      ],
+      "Next": "NotifyPostMortemReady"
+    },
+    
+    "PostMortemFailed": {
+      "Type": "Pass",
+      "Parameters": {
+        "message": "Failed to generate AI post-mortem, manual creation required"
+      },
+      "Next": "CreateFollowUpTasks"
+    },
+    
+    "NotifyPostMortemReady": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage",
+      "Parameters": {
+        "QueueUrl": "${NotificationQueueUrl}",
+        "MessageBody": {
+          "type": "SLACK",
+          "incidentId.$": "$.incidentId",
+          "target": "#incidents",
+          "priority": "normal",
+          "message": "📊 Post-mortem report has been generated and is ready for review"
+        }
+      },
+      "Next": "CreateFollowUpTasks"
+    },
+    
+    "CreateFollowUpTasks": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "aegis.workflow",
+            "DetailType": "Create Follow-Up Tasks",
+            "Detail": {
+              "incidentId.$": "$.incidentId",
+              "tasks": [
+                {
+                  "type": "review_post_mortem",
+                  "assignee": "incident_commander",
+                  "dueInDays": 2
+                },
+                {
+                  "type": "implement_action_items",
+                  "assignee": "engineering_team",
+                  "dueInDays": 7
+                },
+                {
+                  "type": "update_runbook",
+                  "assignee": "sre_team",
+                  "dueInDays": 5
+                }
+              ]
+            },
+            "EventBusName": "${EventBusName}"
+          }
+        ]
+      },
+      "Next": "WorkflowComplete"
+    },
+    
+    "IncidentClosed": {
+      "Type": "Pass",
+      "Result": "Incident already closed",
+      "Next": "WorkflowComplete"
+    },
+    
+    "WorkflowComplete": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [
+          {
+            "Source": "aegis.workflow",
+            "DetailType": "Workflow Completed",
+            "Detail": {
+              "incidentId.$": "$.incidentId",
+              "completedAt.$": "$$.State.EnteredTime",
+              "executionArn.$": "$$.Execution.Id"
+            },
+            "EventBusName": "${EventBusName}"
+          }
+        ]
+      },
+      "End": true
+    }
+  }
+}

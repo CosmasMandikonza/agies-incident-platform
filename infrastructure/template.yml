@@ -1069,3 +1069,30 @@ Outputs:
     Value: !Ref NotificationDLQ
     Export:
       Name: !Sub ${AWS::StackName}-NotificationDLQUrl
+  # Additional Lambda Functions for Step Functions Workflow
+# Add these to your main template.yaml
+
+ValidateInputFunction:
+  Type: AWS::Serverless::Function
+  Properties:
+    FunctionName: !Sub ${AWS::StackName}-validate-input
+    CodeUri: ../src/workflow_support/
+    Handler: validate_input.handler
+    Description: Validates workflow input
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref IncidentsTable
+
+CheckStatusFunction:
+  Type: AWS::Serverless::Function
+  Properties:
+    FunctionName: !Sub ${AWS::StackName}-check-status
+    CodeUri: ../src/workflow_support/
+    Handler: check_status.handler
+    Description: Checks current incident status
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref IncidentsTable
+    Policies:
+      - DynamoDBReadPolicy:
+          TableName: !Ref IncidentsTable
