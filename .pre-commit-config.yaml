@@ -25,7 +25,7 @@ repos:
     rev: 23.12.1
     hooks:
       - id: black
-        language_version: python3.11
+        language_version: python3.13
         args: [--line-length=100]
 
   - repo: https://github.com/pycqa/isort
@@ -153,7 +153,7 @@ repos:
 
 # Configuration
 default_language_version:
-  python: python3.11
+  python: python3.13
   node: 18.19.0
 
 fail_fast: false

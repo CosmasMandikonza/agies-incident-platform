@@ -18,12 +18,12 @@ from shared.config import Config
 from shared.models import AISummary, TimelineEvent
 from shared.dynamodb_client import DynamoDBClient
 from shared.event_publisher import EventPublisher
-from aegis_shared.constants import (
+from shared.constants import (
     EVENT_SOURCE_INCIDENTS,
     EVENT_TYPE_AI_SUMMARY_GENERATED,
     EVENT_TYPE_TIMELINE_EVENT_ADDED
 )
-from aegis_shared.exceptions import AIServiceError, IncidentNotFoundError
+from shared.exceptions import AIServiceError, IncidentNotFoundError
 
 # Initialize AWS Lambda Powertools
 logger = Logger()

@@ -1,0 +1,100 @@
+type Incident {
+  id: ID!
+  title: String!
+  description: String
+  status: IncidentStatus!
+  severity: Severity!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  acknowledgedAt: AWSDateTime
+  resolvedAt: AWSDateTime
+  timeline: [TimelineEvent!]!
+  participants: [Participant!]!
+  aiSummaries: [AISummary!]!
+}
+
+type TimelineEvent {
+  id: ID!
+  timestamp: AWSDateTime!
+  type: String!
+  description: String!
+  source: String!
+  metadata: AWSJSON
+}
+
+type Participant {
+  userId: String!
+  name: String!
+  role: String!
+  joinedAt: AWSDateTime!
+}
+
+type AISummary {
+  id: ID!
+  timestamp: AWSDateTime!
+  summary: String!
+  modelId: String!
+}
+
+enum IncidentStatus {
+  OPEN
+  ACKNOWLEDGED
+  MITIGATING
+  RESOLVED
+  CLOSED
+}
+
+enum Severity {
+  P0
+  P1
+  P2
+  P3
+  P4
+}
+
+type Query {
+  getIncident(id: ID!): Incident
+  listIncidents(
+    status: IncidentStatus
+    severity: Severity
+    limit: Int
+    nextToken: String
+  ): IncidentConnection!
+}
+
+type Mutation {
+  createIncident(input: CreateIncidentInput!): Incident! @aws_iam
+  updateIncidentStatus(
+    id: ID!
+    status: IncidentStatus!
+  ): Incident! @aws_iam
+  addComment(
+    incidentId: ID!
+    text: String!
+  ): TimelineEvent! @aws_iam
+}
+
+type Subscription {
+  onIncidentUpdate(id: ID!): Incident
+    @aws_subscribe(mutations: ["updateIncidentStatus"])
+  onTimelineUpdate(incidentId: ID!): TimelineEvent
+    @aws_subscribe(mutations: ["addComment"])
+}
+
+type IncidentConnection {
+  items: [Incident!]!
+  nextToken: String
+}
+
+input CreateIncidentInput {
+  title: String!
+  description: String
+  severity: Severity!
+  source: String!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}

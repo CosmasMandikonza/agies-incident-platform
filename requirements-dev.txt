@@ -1,59 +1,13 @@
-# Testing frameworks
-pytest==7.4.4
-pytest-cov==4.1.0
-pytest-mock==3.12.0
-pytest-asyncio==0.23.3
-pytest-xdist==3.5.0
-moto[all]==4.2.13
-localstack==3.0.2
-
-# Code quality and linting
-black==23.12.1
-isort==5.13.2
-flake8==7.0.0
-mypy==1.8.0
-pylint==3.0.3
-bandit==1.7.6
-safety==3.0.1
-
-# Type stubs
-boto3-stubs[essential]==1.34.25
-types-requests==2.31.0.10
-types-pyyaml==6.0.12.12
-
-# Documentation
-sphinx==7.2.6
-sphinx-rtd-theme==2.0.0
-myst-parser==2.0.0
-
-# Development utilities
-ipython==8.19.0
-ipdb==0.13.13
-watchdog==3.0.0
-pre-commit==3.6.0
-
-# Performance profiling
-memory-profiler==0.61.0
-line-profiler==4.1.2
-py-spy==0.3.14
-
-# API testing
-httpie==3.2.2
-locust==2.20.1
-
-# AWS development tools
-aws-sam-cli-local==1.108.0
-cfn-lint==0.85.1
-cfn-flip==1.3.0
-
-# Security scanning
-checkov==3.1.50
-semgrep==1.52.0
-
-# Code coverage
-coverage[toml]==7.4.0
-codecov==2.1.13
-
-# Git hooks
-gitpython==3.1.41
-detect-secrets==1.4.0
+pytest
+pytest-cov
+pytest-mock
+pytest-asyncio
+pytest-xdist
+moto[all]
+localstack
+black
+isort
+flake8
+mypy
+bandit
+# The conflicting dev tools have been removed to ensure the core app installs
