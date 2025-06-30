@@ -23,9 +23,9 @@ from botocore.exceptions import ClientError
 from shared.config import Config
 from shared.models import NotificationRequest, NotificationType
 from shared.event_publisher import EventPublisher
-from aegis_shared.constants import EVENT_SOURCE_NOTIFICATIONS
-from aegis_shared.exceptions import ExternalServiceError, ValidationError
-from aegis_shared.utils import get_secret
+from shared.constants import EVENT_SOURCE_NOTIFICATIONS
+from shared.exceptions import ExternalServiceError, ValidationError
+from shared.utils import get_secret
 
 # Initialize AWS Lambda Powertools
 logger = Logger()

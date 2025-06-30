@@ -22,7 +22,7 @@ import botocore.session
 
 # Import shared modules  
 from shared.config import Config
-from aegis_shared.exceptions import ExternalServiceError
+from shared.exceptions import ExternalServiceError
 
 # Initialize AWS Lambda Powertools
 logger = Logger()

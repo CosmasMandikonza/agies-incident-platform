@@ -19,14 +19,14 @@ from shared.models import Incident, TimelineEvent, CreateIncidentInput
 from shared.dynamodb_client import DynamoDBClient
 from shared.event_publisher import EventPublisher
 from shared.validators import validate_incident_input
-from aegis_shared.constants import (
+from shared.constants import (
     EVENT_SOURCE_INCIDENTS,
     EVENT_TYPE_INCIDENT_DECLARED,
     EVENT_TYPE_TIMELINE_EVENT_ADDED,
     ENTITY_TYPE_INCIDENT
 )
-from aegis_shared.exceptions import ValidationError, AegisError
-from aegis_shared.utils import create_response, generate_id
+from shared.exceptions import ValidationError, AegisError
+from shared.utils import create_response, generate_id
 
 # Initialize AWS Lambda Powertools
 logger = Logger()

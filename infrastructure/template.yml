@@ -78,6 +78,17 @@ Parameters:
     MaxValue: 40000
     Description: Maximum DynamoDB capacity units
 
+  # New Parameters for Secrets
+  SlackWebhookUrl:
+    Type: String
+    Default: "https://hooks.slack.com/services/YOUR/SLACK/URL"
+    Description: The webhook URL for Slack notifications.
+
+  PagerDutyApiKey:
+    Type: String
+    Default: "YOUR_PAGERDUTY_API_KEY"
+    Description: The API key for PagerDuty integration.
+
 # Conditions
 Conditions:
   IsProd: !Equals [!Ref Environment, prod]
@@ -92,22 +103,19 @@ Resources:
     Properties:
       LayerName: !Sub ${AWS::StackName}-powertools
       Description: AWS Lambda Powertools for Python
-      ContentUri: layers/powertools/
+      ContentUri: ../src/layers/powertools/ # Corrected Path
       CompatibleRuntimes:
         - python3.11
       RetentionPolicy: Delete
     Metadata:
       BuildMethod: python3.11
-      BuildProperties:
-        Requirements: |
-          aws-lambda-powertools[all]==2.34.0
 
   SharedLibrariesLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:
       LayerName: !Sub ${AWS::StackName}-shared-libs
       Description: Shared libraries and utilities
-      ContentUri: layers/shared/
+      ContentUri: ../src/layers/shared/ # Corrected Path
       CompatibleRuntimes:
         - python3.11
       RetentionPolicy: Delete
@@ -278,7 +286,7 @@ Resources:
         - ResourcePath: /*
           HttpMethod: '*'
           DataTraceEnabled: !If [EnableTracingCondition, true, false]
-          LoggingLevel: !Ref LogLevel
+          LoggingLevel: INFO
           MetricsEnabled: true
           ThrottlingBurstLimit: 5000
           ThrottlingRateLimit: 10000
@@ -394,6 +402,7 @@ Resources:
         Variables:
           TABLE_NAME: !Ref IncidentsTable
           IDEMPOTENCY_TABLE_NAME: !Ref IdempotencyTable
+          NOTIFICATION_SECRETS_ARN: !Ref NotificationSecrets
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref IncidentsTable
@@ -403,9 +412,9 @@ Resources:
             - Effect: Allow
               Action:
                 - secretsmanager:GetSecretValue
-              Resource: !Ref NotificationSecretsArn
+              Resource: !Ref NotificationSecrets
       Events:
-        NotificationQueue:
+        NotificationQueueEvent:
           Type: SQS
           Properties:
             Queue: !GetAtt NotificationQueue.Arn
@@ -424,12 +433,15 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref IncidentsTable
+          EVENT_BUS_NAME: !Ref AegisEventBus
           BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
           MAX_TOKENS: '4000'
           TEMPERATURE: '0.7'
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref IncidentsTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AegisEventBus
         - Statement:
             - Effect: Allow
               Action:
@@ -505,6 +517,32 @@ Resources:
         - EventBridgePutEventsPolicy:
             EventBusName: !Ref AegisEventBus
 
+  # Workflow Support Functions (Correctly Indented)
+  ValidateInputFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-validate-input
+      CodeUri: ../src/workflow_support/
+      Handler: validate_input.handler
+      Description: Validates workflow input
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref IncidentsTable
+
+  CheckStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-check-status
+      CodeUri: ../src/workflow_support/
+      Handler: check_status.handler
+      Description: Checks current incident status
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref IncidentsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref IncidentsTable
+
   # ===== STEP FUNCTIONS =====
   IncidentWorkflowRole:
     Type: AWS::IAM::Role
@@ -516,9 +554,6 @@ Resources:
             Principal:
               Service: states.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
       Policies:
         - PolicyName: StepFunctionsExecutionPolicy
           PolicyDocument:
@@ -530,6 +565,8 @@ Resources:
                 Resource:
                   - !GetAtt TriageFunction.Arn
                   - !GetAtt GenAIScribeFunction.Arn
+                  - !GetAtt ValidateInputFunction.Arn # Added permission
+                  - !GetAtt CheckStatusFunction.Arn   # Added permission
               - Effect: Allow
                 Action:
                   - events:PutEvents
@@ -537,217 +574,32 @@ Resources:
               - Effect: Allow
                 Action:
                   - sqs:SendMessage
-                Resource: !GetAtt NotificationQueue.Arn
+                Resource: 
+                  - !GetAtt NotificationQueue.Arn
+                  - !GetAtt CallbackQueue.Arn
 
   IncidentWorkflow:
-    Type: AWS::StepFunctions::StateMachine
+    Type: AWS::Serverless::StateMachine # Using Serverless transform for simplicity
     Properties:
-      StateMachineName: !Sub ${AWS::StackName}-incident-workflow
-      StateMachineType: STANDARD
-      RoleArn: !GetAtt IncidentWorkflowRole.Arn
-      TracingConfiguration:
-        Enabled: !If [EnableTracingCondition, true, false]
-      LoggingConfiguration:
-        Level: !Ref LogLevel
-        IncludeExecutionData: true
-        Destinations:
-          - CloudWatchLogsLogGroup:
-              LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
-      DefinitionString: !Sub |
-        {
-          "Comment": "Aegis Incident Lifecycle Workflow",
-          "StartAt": "TriageIncident",
-          "States": {
-            "TriageIncident": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::lambda:invoke",
-              "Parameters": {
-                "FunctionName": "${TriageFunction.Arn}",
-                "Payload.$": "$"
-              },
-              "ResultPath": "$.triage",
-              "Next": "CheckSeverity"
-            },
-            "CheckSeverity": {
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.triage.severity",
-                  "StringEquals": "P0",
-                  "Next": "ImmediateNotification"
-                },
-                {
-                  "Variable": "$.triage.severity",
-                  "StringEquals": "P1",
-                  "Next": "StandardNotification"
-                }
-              ],
-              "Default": "StandardNotification"
-            },
-            "ImmediateNotification": {
-              "Type": "Parallel",
-              "Branches": [
-                {
-                  "StartAt": "PageOnCall",
-                  "States": {
-                    "PageOnCall": {
-                      "Type": "Task",
-                      "Resource": "arn:aws:states:::sqs:sendMessage",
-                      "Parameters": {
-                        "QueueUrl": "${NotificationQueue}",
-                        "MessageBody": {
-                          "type": "PAGE",
-                          "incidentId.$": "$.incidentId",
-                          "severity": "P0",
-                          "message.$": "$.title"
-                        }
-                      },
-                      "End": true
-                    }
-                  }
-                },
-                {
-                  "StartAt": "NotifySlack",
-                  "States": {
-                    "NotifySlack": {
-                      "Type": "Task",
-                      "Resource": "arn:aws:states:::sqs:sendMessage",
-                      "Parameters": {
-                        "QueueUrl": "${NotificationQueue}",
-                        "MessageBody": {
-                          "type": "SLACK",
-                          "channel": "#incidents-p0",
-                          "incidentId.$": "$.incidentId",
-                          "message.$": "$.title"
-                        }
-                      },
-                      "End": true
-                    }
-                  }
-                }
-              ],
-              "Next": "WaitForAcknowledgement"
-            },
-            "StandardNotification": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::sqs:sendMessage",
-              "Parameters": {
-                "QueueUrl": "${NotificationQueue}",
-                "MessageBody": {
-                  "type": "SLACK",
-                  "channel": "#incidents",
-                  "incidentId.$": "$.incidentId",
-                  "message.$": "$.title"
-                }
-              },
-              "Next": "WaitForAcknowledgement"
-            },
-            "WaitForAcknowledgement": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
-              "Parameters": {
-                "QueueUrl": "${CallbackQueue}",
-                "MessageBody": {
-                  "TaskToken.$": "$$.Task.Token",
-                  "IncidentId.$": "$.incidentId",
-                  "Action": "ACKNOWLEDGE"
-                }
-              },
-              "TimeoutSeconds": 300,
-              "Catch": [
-                {
-                  "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
-                  "Next": "EscalateIncident"
-                }
-              ],
-              "Next": "IncidentAcknowledged"
-            },
-            "EscalateIncident": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::events:putEvents",
-              "Parameters": {
-                "Entries": [
-                  {
-                    "Source": "aegis.workflow",
-                    "DetailType": "Incident Escalated",
-                    "Detail": {
-                      "incidentId.$": "$.incidentId",
-                      "reason": "No acknowledgement within timeout"
-                    },
-                    "EventBusName": "${AegisEventBus}"
-                  }
-                ]
-              },
-              "Next": "NotifyManagement"
-            },
-            "NotifyManagement": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::sqs:sendMessage",
-              "Parameters": {
-                "QueueUrl": "${NotificationQueue}",
-                "MessageBody": {
-                  "type": "PAGE",
-                  "target": "MANAGEMENT",
-                  "incidentId.$": "$.incidentId",
-                  "message": "Incident escalated - no acknowledgement"
-                }
-              },
-              "Next": "IncidentAcknowledged"
-            },
-            "IncidentAcknowledged": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::events:putEvents",
-              "Parameters": {
-                "Entries": [
-                  {
-                    "Source": "aegis.workflow",
-                    "DetailType": "Incident Status Changed",
-                    "Detail": {
-                      "incidentId.$": "$.incidentId",
-                      "status": "ACKNOWLEDGED"
-                    },
-                    "EventBusName": "${AegisEventBus}"
-                  }
-                ]
-              },
-              "Next": "MonitorResolution"
-            },
-            "MonitorResolution": {
-              "Type": "Wait",
-              "Seconds": 3600,
-              "Next": "CheckResolution"
-            },
-            "CheckResolution": {
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.status",
-                  "StringEquals": "RESOLVED",
-                  "Next": "GeneratePostMortem"
-                }
-              ],
-              "Default": "MonitorResolution"
-            },
-            "GeneratePostMortem": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::lambda:invoke",
-              "Parameters": {
-                "FunctionName": "${GenAIScribeFunction.Arn}",
-                "Payload": {
-                  "action": "GENERATE_POST_MORTEM",
-                  "incidentId.$": "$.incidentId"
-                }
-              },
-              "ResultPath": "$.postMortem",
-              "End": true
-            }
-          }
-        }
+      Name: !Sub ${AWS::StackName}-incident-workflow
+      Type: STANDARD
+      Role: !GetAtt IncidentWorkflowRole.Arn
+      Tracing:
+        Enabled: !Ref EnableTracingCondition
+      DefinitionUri: ../infrastructure/stepfunctions/incident-workflow.asl.json
+      DefinitionSubstitutions:
+        TriageFunctionArn: !GetAtt TriageFunction.Arn
+        GenAIScribeFunctionArn: !GetAtt GenAIScribeFunction.Arn
+        ValidateInputFunctionArn: !GetAtt ValidateInputFunction.Arn
+        CheckStatusFunctionArn: !GetAtt CheckStatusFunction.Arn
+        NotificationQueueUrl: !Ref NotificationQueue
+        CallbackQueueUrl: !Ref CallbackQueue
+        AegisEventBusName: !Ref AegisEventBus
 
   StepFunctionsLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/stepfunctions/${AWS::StackName}-workflow
+      LogGroupName: !Sub /aws/stepfunctions/${IncidentWorkflow}
       RetentionInDays: 30
 
   CallbackQueue:
@@ -755,7 +607,7 @@ Resources:
     Properties:
       QueueName: !Sub ${AWS::StackName}-callback
       VisibilityTimeout: 60
-      MessageRetentionPeriod: 3600  # 1 hour
+      MessageRetentionPeriod: 3600 # 1 hour
 
   # ===== APPSYNC GRAPHQL API =====
   GraphQLApi:
@@ -766,12 +618,13 @@ Resources:
       UserPoolConfig:
         UserPoolId: !Ref UserPool
         DefaultAction: ALLOW
+        AwsRegion: !Ref AWS::Region
       AdditionalAuthenticationProviders:
         - AuthenticationType: AWS_IAM
       LogConfig:
         CloudWatchLogsRoleArn: !GetAtt AppSyncLogRole.Arn
         FieldLogLevel: !If [IsProd, ERROR, ALL]
-      XrayEnabled: !If [EnableTracingCondition, true, false]
+      XrayEnabled: !Ref EnableTracingCondition
 
   AppSyncLogRole:
     Type: AWS::IAM::Role
@@ -790,107 +643,7 @@ Resources:
     Type: AWS::AppSync::GraphQLSchema
     Properties:
       ApiId: !GetAtt GraphQLApi.ApiId
-      Definition: |
-        type Incident {
-          id: ID!
-          title: String!
-          description: String
-          status: IncidentStatus!
-          severity: Severity!
-          createdAt: AWSDateTime!
-          updatedAt: AWSDateTime!
-          acknowledgedAt: AWSDateTime
-          resolvedAt: AWSDateTime
-          timeline: [TimelineEvent!]!
-          participants: [Participant!]!
-          aiSummaries: [AISummary!]!
-        }
-
-        type TimelineEvent {
-          id: ID!
-          timestamp: AWSDateTime!
-          type: String!
-          description: String!
-          source: String!
-          metadata: AWSJSON
-        }
-
-        type Participant {
-          userId: String!
-          name: String!
-          role: String!
-          joinedAt: AWSDateTime!
-        }
-
-        type AISummary {
-          id: ID!
-          timestamp: AWSDateTime!
-          summary: String!
-          modelId: String!
-        }
-
-        enum IncidentStatus {
-          OPEN
-          ACKNOWLEDGED
-          MITIGATING
-          RESOLVED
-          CLOSED
-        }
-
-        enum Severity {
-          P0
-          P1
-          P2
-          P3
-          P4
-        }
-
-        type Query {
-          getIncident(id: ID!): Incident
-          listIncidents(
-            status: IncidentStatus
-            severity: Severity
-            limit: Int
-            nextToken: String
-          ): IncidentConnection!
-        }
-
-        type Mutation {
-          createIncident(input: CreateIncidentInput!): Incident!
-          updateIncidentStatus(
-            id: ID!
-            status: IncidentStatus!
-          ): Incident!
-          addComment(
-            incidentId: ID!
-            text: String!
-          ): TimelineEvent!
-        }
-
-        type Subscription {
-          onIncidentUpdate(id: ID!): Incident
-            @aws_subscribe(mutations: ["updateIncidentStatus"])
-          onTimelineUpdate(incidentId: ID!): TimelineEvent
-            @aws_subscribe(mutations: ["addComment"])
-        }
-
-        type IncidentConnection {
-          items: [Incident!]!
-          nextToken: String
-        }
-
-        input CreateIncidentInput {
-          title: String!
-          description: String
-          severity: Severity!
-          source: String!
-        }
-
-        schema {
-          query: Query
-          mutation: Mutation
-          subscription: Subscription
-        }
+      DefinitionS3Location: ../infrastructure/appsync/schema.graphql # Prefer S3 for large schemas
 
   # DynamoDB Data Source for AppSync
   IncidentsTableDataSource:
@@ -951,7 +704,7 @@ Resources:
         SSEEnabled: true
 
   # ===== SECRETS MANAGER =====
-  NotificationSecretsArn:
+  NotificationSecrets:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub ${AWS::StackName}-notification-secrets
@@ -1069,30 +822,3 @@ Outputs:
     Value: !Ref NotificationDLQ
     Export:
       Name: !Sub ${AWS::StackName}-NotificationDLQUrl
-  # Additional Lambda Functions for Step Functions Workflow
-# Add these to your main template.yaml
-
-ValidateInputFunction:
-  Type: AWS::Serverless::Function
-  Properties:
-    FunctionName: !Sub ${AWS::StackName}-validate-input
-    CodeUri: ../src/workflow_support/
-    Handler: validate_input.handler
-    Description: Validates workflow input
-    Environment:
-      Variables:
-        TABLE_NAME: !Ref IncidentsTable
-
-CheckStatusFunction:
-  Type: AWS::Serverless::Function
-  Properties:
-    FunctionName: !Sub ${AWS::StackName}-check-status
-    CodeUri: ../src/workflow_support/
-    Handler: check_status.handler
-    Description: Checks current incident status
-    Environment:
-      Variables:
-        TABLE_NAME: !Ref IncidentsTable
-    Policies:
-      - DynamoDBReadPolicy:
-          TableName: !Ref IncidentsTable
